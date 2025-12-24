@@ -14,11 +14,18 @@ class Config:
     DENSITY_THRESHOLD: int = 15
     CONFIDENCE_THRESHOLD: float = 0.5
     
-    # Model Latencies (Simulated in seconds)
-    LATENCY_YOLO: float = 0.05
-    LATENCY_RF_DETR: float = 0.2
-    LATENCY_DINO_X: float = 0.1
-    LATENCY_SAM_3: float = 0.15
-
-    # Paths (Placeholder)
-    MODEL_WEIGHTS_DIR: str = "weights/"
+    # Paths
+    WEIGHTS_DIR: str = "weights"
+    PATH_YOLO: str = "weights/yolov12s.pt"          # YOLOv12 (User specified)
+    PATH_RF_DETR: str = "weights/rf_detr.pt"       # RF-DETR (Model ID)
+    PATH_FLORENCE_2: str = "microsoft/Florence-2-base" # Florence-2 (HuggingFace ID)
+    PATH_SAM_3: str = "weights/sam3.pt"           # SAM3 (Requires CUDA, HF auth for download)
+    
+    # API Keys
+    ROBOFLOW_API_KEY: str = "uUgID4rbpfXeUdbNClkg" # From user screenshot
+    
+    # Latency values are now dependent on actual inference, but we keep init latency for safety
+    LATENCY_YOLO: float = 0.0
+    LATENCY_RF_DETR: float = 0.0
+    LATENCY_DINO_X: float = 0.0
+    LATENCY_SAM_3: float = 0.0

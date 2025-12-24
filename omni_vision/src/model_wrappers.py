@@ -46,7 +46,7 @@ class YOLOv12Wrapper(ModelWrapper):
         Simulate YOLO prediction.
         
         Args:
-            image: Input image data.
+            image: Input image data (numpy array or bytes).
         
         Returns:
             List of detected objects.
@@ -54,13 +54,34 @@ class YOLOv12Wrapper(ModelWrapper):
         # Simulate latency
         await asyncio.sleep(Config.LATENCY_YOLO)
         
-        # In prod: results = self.model.predict(image)
-        # In prod: return [DetectionResult(...) for result in results]
+        # Determine if we should simulate high density based on image properties
+        # This allows us to create specific "Test Scenarios"
+        is_high_density = False
         
-        # Mock logic: Return random detections
-        # If 'simulate_high_density' is passed in kwargs for testing, return many objects
-        count = 20 if kwargs.get('simulate_high_density') else random.randint(1, 10)
+        try:
+            # Check if numpy (from demo.py)
+            if hasattr(image, "shape"):
+                width = image.shape[1]
+                if width > 800:
+                    is_high_density = True
+            # Check if bytes (from main.py)
+            elif isinstance(image, bytes):
+                # Basic heuristic: Check file size assuming larger byte count ~ larger image
+                if len(image) > 500 * 1024: # > 500KB
+                    is_high_density = True
+        except:
+            pass
         
+        # Override with kwarg if present
+        if kwargs.get('simulate_high_density'):
+             is_high_density = True
+
+        # Generation Logic
+        if is_high_density:
+             count = random.randint(16, 25) # Triggers RF-DETR (>15)
+        else:
+             count = random.randint(3, 10) # Normal
+
         results = []
         for _ in range(count):
             results.append(DetectionResult(

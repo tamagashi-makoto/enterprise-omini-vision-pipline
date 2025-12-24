@@ -7,3 +7,11 @@ Pillow
 pytest
 pytest-asyncio
 httpx
+opencv-python-headless
+ultralytics
+requests
+transformers
+timm
+einops
+torch
+torchvision
