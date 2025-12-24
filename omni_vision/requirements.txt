@@ -1,17 +1,38 @@
+# Core web framework
 fastapi
-uvicorn
+uvicorn[standard]
 python-multipart
 pydantic
+
+# setuptools for pkg_resources compatibility (Python 3.12)
+setuptools>=70.0.0
+
 numpy
 Pillow
+
+# PyTorch with CUDA support (installed separately in Docker)
+# torch==2.7.0
+# torchvision
+# torchaudio
+
+# YOLOv12 (Ultralytics)
+ultralytics>=8.3.0
+
+# Florence-2 (HuggingFace)
+transformers>=4.45.0
+huggingface_hub
+einops
+timm
+
+# RF-DETR (Local inference)
+rfdetr
+supervision
+
+# SAM3 dependencies (additional)
+decord
+pycocotools
+
+# Testing
 pytest
 pytest-asyncio
 httpx
-opencv-python-headless
-ultralytics
-requests
-transformers
-timm
-einops
-torch
-torchvision

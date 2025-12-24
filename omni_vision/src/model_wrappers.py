@@ -1,10 +1,22 @@
-import time
-import random
+"""
+Model wrappers for the Omni-Vision pipeline.
+Implements real model inference with GPU support.
+"""
+import os
 import asyncio
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from pathlib import Path
+import torch
+from PIL import Image
+import numpy as np
+
 from .config import Config, ModelType
+
+# Weight file paths
+WEIGHTS_DIR = Path(__file__).parent / "weights"
+
 
 @dataclass
 class DetectionResult:
@@ -12,16 +24,25 @@ class DetectionResult:
     label: str
     confidence: float
     box: List[float]  # [x1, y1, x2, y2]
+    mask: Optional[np.ndarray] = None  # Optional segmentation mask
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "label": self.label,
             "confidence": self.confidence,
             "box": self.box
         }
+        if self.mask is not None:
+            result["has_mask"] = True
+        return result
+
 
 class ModelWrapper(ABC):
     """Abstract base class for all model wrappers."""
+    
+    def __init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = None
     
     @abstractmethod
     async def load(self):
@@ -33,141 +54,326 @@ class ModelWrapper(ABC):
         """Run inference on the image."""
         pass
 
+
 class YOLOv12Wrapper(ModelWrapper):
-    """Wrapper for YOLOv12 (Screening Model)."""
+    """
+    Wrapper for YOLOv12 (Screening Model).
+    Uses ultralytics library with pretrained weights in src/weights/.
+    """
 
     async def load(self):
-        # In prod: self.model = YOLO("yolov12.pt")
-        print(f"Loading {ModelType.YOLO_V12}...")
-        await asyncio.sleep(0.1) 
+        """Load YOLOv12 model from local weights."""
+        from ultralytics import YOLO
+        
+        print(f"Loading {ModelType.YOLO_V12}... Device: {self.device}")
+        
+        # Check for local weights first
+        weight_path = WEIGHTS_DIR / "yolo12m.pt"
+        if weight_path.exists():
+            self.model = YOLO(str(weight_path))
+            print(f"Loaded YOLOv12 from local weights: {weight_path}")
+        else:
+            # Download pretrained model
+            self.model = YOLO("yolo12m.pt")
+            print("Loaded YOLOv12 from pretrained (downloading if needed)")
+        
+        # Move to GPU if available
+        self.model.to(self.device)
+        print(f"YOLOv12 ready on {self.device}")
 
-    async def predict(self, image: Any, **kwargs) -> List[DetectionResult]:
+    async def predict(self, image: Image.Image, **kwargs) -> List[DetectionResult]:
         """
-        Simulate YOLO prediction.
+        Run YOLOv12 object detection.
         
         Args:
-            image: Input image data (numpy array or bytes).
+            image: PIL Image or numpy array
         
         Returns:
-            List of detected objects.
+            List of detected objects with bounding boxes.
         """
-        # Simulate latency
-        await asyncio.sleep(Config.LATENCY_YOLO)
+        if self.model is None:
+            await self.load()
         
-        # Determine if we should simulate high density based on image properties
-        # This allows us to create specific "Test Scenarios"
-        is_high_density = False
+        # Run inference in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        results = await loop.run_in_executor(
+            None, 
+            lambda: self.model.predict(image, verbose=False)
+        )
         
-        try:
-            # Check if numpy (from demo.py)
-            if hasattr(image, "shape"):
-                width = image.shape[1]
-                if width > 800:
-                    is_high_density = True
-            # Check if bytes (from main.py)
-            elif isinstance(image, bytes):
-                # Basic heuristic: Check file size assuming larger byte count ~ larger image
-                if len(image) > 500 * 1024: # > 500KB
-                    is_high_density = True
-        except:
-            pass
+        detections = []
+        for result in results:
+            boxes = result.boxes
+            for i in range(len(boxes)):
+                box = boxes.xyxy[i].cpu().numpy().tolist()
+                conf = float(boxes.conf[i].cpu().numpy())
+                cls = int(boxes.cls[i].cpu().numpy())
+                label = result.names[cls]
+                
+                detections.append(DetectionResult(
+                    label=label,
+                    confidence=conf,
+                    box=box
+                ))
         
-        # Override with kwarg if present
-        if kwargs.get('simulate_high_density'):
-             is_high_density = True
+        return detections
 
-        # Generation Logic
-        if is_high_density:
-             count = random.randint(16, 25) # Triggers RF-DETR (>15)
-        else:
-             count = random.randint(3, 10) # Normal
-
-        results = []
-        for _ in range(count):
-            results.append(DetectionResult(
-                label="person", 
-                confidence=random.uniform(0.6, 0.99),
-                box=[random.randint(0, 100), random.randint(0, 100), random.randint(200, 300), random.randint(200, 300)]
-            ))
-        return results
 
 class RFDETRWrapper(ModelWrapper):
-    """Wrapper for RF-DETR (High-Precision Model)."""
+    """
+    Wrapper for RF-DETR using the official rfdetr package.
+    Runs locally on GPU for high-precision object detection.
+    """
+
+    def __init__(self):
+        super().__init__()
 
     async def load(self):
-        # In prod: self.model = RFDETR.from_pretrained(...)
-        print(f"Loading {ModelType.RF_DETR}...")
-        await asyncio.sleep(0.2)
+        """Load RF-DETR model."""
+        from rfdetr import RFDETRBase
+        
+        print(f"Loading {ModelType.RF_DETR}... Device: {self.device}")
+        
+        self.model = RFDETRBase()
+        
+        # Note: optimize_for_inference() can cause TorchScript tracing errors
+        # Skipping for now - inference still works without optimization
+        # if self.device == "cuda":
+        #     self.model.optimize_for_inference()
+        
+        print(f"RF-DETR ready on {self.device}")
 
-    async def predict(self, image: Any, **kwargs) -> List[DetectionResult]:
+
+    async def predict(self, image: Image.Image, threshold: float = 0.5, **kwargs) -> List[DetectionResult]:
         """
-        Simulate RF-DETR prediction for complex scenes.
+        Run RF-DETR detection.
+        
+        Args:
+            image: PIL Image
+            threshold: Confidence threshold (default: 0.5)
+        
+        Returns:
+            List of high-precision detections.
         """
-        await asyncio.sleep(Config.LATENCY_RF_DETR)
+        if self.model is None:
+            await self.load()
         
-        # In prod: outputs = self.model(image)
+        # Import COCO classes for labels
+        from rfdetr.util.coco_classes import COCO_CLASSES
         
-        # Mock logic: Return fewer, higher confidence detections
-        results = []
-        for _ in range(random.randint(5, 15)):
-             results.append(DetectionResult(
-                label="car", 
-                confidence=random.uniform(0.8, 0.99),
-                box=[random.randint(0, 100), random.randint(0, 100), random.randint(200, 300), random.randint(200, 300)]
+        # Run inference in thread pool
+        loop = asyncio.get_event_loop()
+        
+        def _inference():
+            return self.model.predict(image, threshold=threshold)
+        
+        result = await loop.run_in_executor(None, _inference)
+        
+        detections = []
+        for i, (class_id, conf) in enumerate(zip(result.class_id, result.confidence)):
+            box = result.xyxy[i].tolist()  # [x1, y1, x2, y2]
+            label = COCO_CLASSES[int(class_id)]
+            
+            detections.append(DetectionResult(
+                label=label,
+                confidence=float(conf),
+                box=box
             ))
-        return results
+        
+        return detections
 
-class DINOXWrapper(ModelWrapper):
-    """Wrapper for DINO-X (Open-Vocabulary Detection)."""
+
+class Florence2Wrapper(ModelWrapper):
+    """
+    Wrapper for Florence-2 (Open-Vocabulary Detection).
+    Uses Microsoft's Florence-2 model from HuggingFace.
+    Replaces DINO-X as API key is not available.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.processor = None
 
     async def load(self):
-        # In prod: self.model = DINOX.load(...)
-        print(f"Loading {ModelType.DINO_X}...")
-        await asyncio.sleep(0.2)
+        """Load Florence-2 model from HuggingFace."""
+        from transformers import AutoProcessor, AutoModelForCausalLM
+        
+        print(f"Loading {ModelType.FLORENCE_2}... Device: {self.device}")
+        
+        if self.device == "cpu":
+            print("WARNING: Florence-2 on CPU will be slow. GPU recommended.")
+        
+        model_id = "microsoft/Florence-2-base"
+        
+        self.processor = AutoProcessor.from_pretrained(
+            model_id, 
+            trust_remote_code=True
+        )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            trust_remote_code=True,
+            torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
+            attn_implementation="eager"  # Fix for transformers compatibility
+        ).to(self.device)
+        
+        print(f"Florence-2 loaded on {self.device}")
 
-    async def predict(self, image: Any, text_query: str = "", **kwargs) -> List[DetectionResult]:
+
+    async def predict(self, image: Image.Image, text_query: str = "", **kwargs) -> List[DetectionResult]:
         """
-        Simulate text-prompted detection.
+        Run Florence-2 open-vocabulary detection.
+        
+        Args:
+            image: PIL Image
+            text_query: Text prompt describing what to detect
+        
+        Returns:
+            List of detections matching the query.
         """
-        await asyncio.sleep(Config.LATENCY_DINO_X)
+        if self.model is None:
+            await self.load()
         
         if not text_query:
             return []
-            
-        # In prod: self.model.predict(image, text_prompt=text_query)
         
-        # Mock logic: Return detections matching the query
-        results = []
-        for _ in range(random.randint(1, 3)):
-             results.append(DetectionResult(
-                label=text_query, 
-                confidence=random.uniform(0.7, 0.95),
-                box=[random.randint(50, 150), random.randint(50, 150), random.randint(150, 250), random.randint(150, 250)]
-            ))
-        return results
+        # Florence-2 task for object detection with text
+        task_prompt = "<CAPTION_TO_PHRASE_GROUNDING>"
+        prompt = f"{task_prompt} {text_query}"
+        
+        loop = asyncio.get_event_loop()
+        
+        def _inference():
+            inputs = self.processor(
+                text=prompt, 
+                images=image, 
+                return_tensors="pt"
+            ).to(self.device)
+            
+            # Convert pixel_values to the model's dtype (float16 on CUDA)
+            if self.device == "cuda":
+                inputs["pixel_values"] = inputs["pixel_values"].half()
+            
+            with torch.no_grad():
+                generated_ids = self.model.generate(
+                    input_ids=inputs["input_ids"],
+                    pixel_values=inputs["pixel_values"],
+                    max_new_tokens=1024,
+                    do_sample=False,
+                    num_beams=1  # Use greedy decoding to avoid beam search issues
+                )
+            
+            generated_text = self.processor.batch_decode(
+                generated_ids, 
+                skip_special_tokens=False
+            )[0]
+            
+            parsed = self.processor.post_process_generation(
+                generated_text,
+                task=task_prompt,
+                image_size=(image.width, image.height)
+            )
+            return parsed
+        
+        result = await loop.run_in_executor(None, _inference)
+        
+        detections = []
+        if task_prompt in result:
+            data = result[task_prompt]
+            boxes = data.get("bboxes", [])
+            labels = data.get("labels", [])
+            
+            for box, label in zip(boxes, labels):
+                detections.append(DetectionResult(
+                    label=label,
+                    confidence=0.9,  # Florence-2 doesn't output confidence
+                    box=list(box)
+                ))
+        
+        return detections
+
 
 class SAM3Wrapper(ModelWrapper):
-    """Wrapper for SAM 3 (Segmentation)."""
-    
-    async def load(self):
-        # In prod: self.sam = sam_model_registry["vit_h"](checkpoint=...)
-        print(f"Loading {ModelType.SAM_3}...")
-        await asyncio.sleep(0.5)
+    """
+    Wrapper for SAM 3 (Segment Anything Model 3).
+    Requires GPU - CPU execution is not supported.
+    """
 
-    async def predict(self, image: Any, boxes: List[List[float]], **kwargs) -> List[Any]:
-        """
-        Simulate segmentation mask generation given bounding boxes.
+    def __init__(self):
+        super().__init__()
+        self.processor = None
+
+    async def load(self):
+        """Load SAM3 model onto GPU."""
+        from sam3.model_builder import build_sam3_image_model
+        from sam3.model.sam3_image_processor import Sam3Processor
         
-        Returns:
-            List of mock masks (just simple strings or placeholders for now, 
-            in prod would be binary arrays or RLE).
-        """
-        await asyncio.sleep(Config.LATENCY_SAM_3)
+        print(f"Loading {ModelType.SAM_3}... Device: {self.device}")
         
-        if not boxes:
-            return []
+        if self.device == "cpu":
+            raise RuntimeError(
+                "SAM3 requires GPU. CPU execution is not supported. "
+                "Please ensure CUDA is available and properly configured."
+            )
+        
+        # HuggingFace auth from environment
+        hf_token = os.environ.get("HF_TOKEN")
+        if hf_token:
+            from huggingface_hub import login
+            login(token=hf_token)
+        
+        # Build SAM3 model
+        self.model = build_sam3_image_model()
+        self.processor = Sam3Processor(self.model)
+        
+        print(f"SAM3 loaded successfully on {self.device}")
+
+    async def predict(
+        self, 
+        image: Image.Image, 
+        boxes: Optional[List[List[float]]] = None,
+        text_prompt: Optional[str] = None,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Generate segmentation masks using SAM3.
+        
+        Args:
+            image: PIL Image
+            boxes: Optional bounding boxes (not used in current SAM3 API)
+            text_prompt: Optional text prompt for segmentation
             
-        # In prod: self.sam.predict(image, box=boxes)
+        Returns:
+            Dictionary with masks, boxes, and scores
+        """
+        if self.model is None:
+            await self.load()
         
-        # Mock logic: Return one mask per box
-        return [f"mask__{i}" for i in range(len(boxes))]
+        loop = asyncio.get_event_loop()
+        
+        def _inference():
+            # Set image in processor
+            inference_state = self.processor.set_image(image)
+            
+            if text_prompt:
+                # Text-prompted segmentation
+                output = self.processor.set_text_prompt(
+                    state=inference_state, 
+                    prompt=text_prompt
+                )
+                return output
+            else:
+                # For now, return empty result if no text prompt
+                # SAM3's automatic mask generation requires different API
+                return {"masks": [], "boxes": [], "scores": []}
+        
+        result = await loop.run_in_executor(None, _inference)
+        
+        # Handle different output formats
+        if isinstance(result, dict):
+            return {
+                "masks": result.get("masks", []),
+                "boxes": result.get("boxes", []),
+                "scores": result.get("scores", [])
+            }
+        else:
+            return {"masks": [], "boxes": [], "scores": []}
