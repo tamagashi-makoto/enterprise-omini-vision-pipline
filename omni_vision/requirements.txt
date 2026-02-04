@@ -40,3 +40,7 @@ llama-cpp-python>=0.3.0
 pytest
 pytest-asyncio
 httpx
+
+# Enterprise features
+psutil>=5.9.0
+prometheus-client>=0.19.0  # Optional for metrics
