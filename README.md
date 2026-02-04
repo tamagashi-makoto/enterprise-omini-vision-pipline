@@ -1,178 +1,97 @@
 # Omni-Vision-Analytics
 
-**Omni-Vision-Analytics** is an intelligent orchestration pipeline that dynamically selects the best computer vision model based on scene complexity and user intent. SAM3 serves as the final source of truth for pixel-level masks.
+Vision pipeline for object detection and segmentation. Routes to different models depending on scene density. SAM3 generates final masks.
 
-## 🎯 Use Cases
+## Examples
 
-### 1. E-commerce Cutout (Background Removal)
+### Background Removal
 ```bash
-curl -X POST "http://localhost:8000/analyze" \
-  -F "file=@product.jpg"
+curl -X POST http://localhost:8000/analyze -F "file=@product.jpg"
 ```
-Uses: YOLO → NMS merge → SAM3 (box prompts)
 
-### 2. Privacy Masking (Faces, License Plates)
+### Privacy Masking
 ```bash
-curl -X POST "http://localhost:8000/analyze" \
-  -F "file=@photo.jpg" \
-  -F "text_query=face, license plate" \
-  -F "mode=query"
+curl -X POST http://localhost:8000/analyze -F "file=@photo.jpg" -F "text_query=face, license plate" -F "mode=query"
 ```
-Uses: SAM3 (text prompt) → fallback to YOLO/RF-DETR if needed
 
-### 3. Manufacturing Visual Inspection
+### Defect Detection
 ```bash
-curl -X POST "http://localhost:8000/analyze" \
-  -F "file=@pcb.jpg" \
-  -F "text_query=scratch, crack, defect" \
-  -F "mode=query"
-```
-Uses: SAM3 (text prompt) → Florence-2 rerank (optional) → SAM3 (box prompts)
-
-## 🧠 System Architecture
-
-```
-┌─────────────┐     ┌─────────────┐
-│  YOLOv12    │────>│  BoxSet     │
-│  (Fast)     │     │  Merge      │
-└─────────────┘     │  (NMS)      │     ┌─────────────┐
-                    │             │────>│  SAM3       │
-┌─────────────┐     │  Filter     │     │  (Masks)    │
-│  RF-DETR    │────>│  (Area)     │     └─────────────┘
-│  (Dense)    │     │             │
-└─────────────┘     │  Top-K      │
-                    └─────────────┘
-┌─────────────┐
-│ Florence-2  │ (Optional rerank in query mode)
-└─────────────┘
+curl -X POST http://localhost:8000/analyze -F "file=@pcb.jpg" -F "text_query=scratch, crack" -F "mode=query"
 ```
 
-### Inference Modes
+## Architecture
 
-| Mode | Flow | Use Case |
-|------|------|----------|
-| `auto` (default) | YOLO → (RF-DETR if dense) → merge → Top-K → SAM3 (box prompt) | E-commerce, baseline privacy |
-| `query` | SAM3 (text-first) → fallback to detectors → SAM3 (box prompt) | Open-vocabulary, defect discovery |
+```
+Input -> YOLOv12 -> RF-DETR (if dense) -> NMS -> Filter -> SAM3 -> Masks
+         Fast        Dense                        Area
+```
 
-## 🛠️ Tech Stack
-- **Language:** Python 3.10+
-- **API:** FastAPI (Async)
-- **Models:** YOLOv12, RF-DETR, Florence-2, SAM3
-- **Containerization:** Docker & Docker Compose
+**Models**
+- YOLOv12: Fast object detection
+- RF-DETR: Dense scenes (triggered when YOLO detects > DENSITY_THRESHOLD objects)
+- Florence-2: Text-guided reranking (optional)
+- SAM3: Segmentation masks
 
-## 🚀 Getting Started
+**Modes**
+- `auto`: YOLO first, then RF-DETR if needed
+- `query`: SAM3 text prompt first, falls back to detectors
 
-### Prerequisites
-- Docker & Docker Compose
-- NVIDIA GPU with CUDA (recommended for SAM3)
-- HuggingFace token (for SAM3): `export HF_TOKEN=your_token`
+## Install
 
-### Running with Docker (Recommended)
+Docker:
 ```bash
-# Build and Run
 docker-compose up --build
 ```
-The API will be available at `http://localhost:8000`.
 
-### Running Locally
+Local:
 ```bash
-# Install dependencies
 pip install -r requirements.txt
-
-# Run Server
-python -m uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+HF_TOKEN=your_token python -m uvicorn src.main:app --host 0 --port 8000
 ```
 
-## 🔌 API Endpoints
+Requires Python 3.10+, CUDA GPU recommended, HF_TOKEN for SAM3 access.
 
-### `GET /health`
-Check system status including SAM3 availability.
+## API
 
+### POST /analyze
+
+| Param | Type | Required | Description |
+|-------|------|----------|-------------|
+| file | file | Yes | Image to analyze |
+| text_query | string | No | Search query for query mode |
+| mode | string | No | auto or query (default: auto) |
+
+Returns:
 ```json
 {
-  "status": "healthy",
-  "models_loaded": true,
-  "cuda_available": true,
-  "sam3_enabled": true
+  "meta": {"processing_mode": "YOLO(5)", "objects_detected": 5},
+  "detections": [{"label": "person", "confidence": 0.95, "box": [10,20,100,200], "has_mask": true}],
+  "masks_generated": 5
 }
 ```
 
-### `POST /analyze`
-Analyze an image using the intelligent model pipeline.
+### GET /health
 
-**Parameters:**
-- `file`: (Required) Image file
-- `text_query`: (Optional) Text query for open-vocabulary detection
-- `mode`: (Optional) `"auto"` or `"query"` (default: `"auto"`)
+System health check.
 
-**Response:**
-```json
-{
-  "meta": {
-    "processing_mode": "YOLO(5) → RF-DETR(3)",
-    "objects_detected": 5
-  },
-  "detections": [
-    {"label": "person", "confidence": 0.95, "box": [10, 20, 100, 200], "has_mask": true}
-  ],
-  "segmentation_available": true,
-  "masks_generated": 5,
-  "mask_scores": [0.95, 0.92, ...],
-  "mask_boxes": [[10, 20, 100, 200], ...],
-  "mode_used": "auto"
-}
-```
+## Testing
 
-## 🧪 Running Tests
-
-### Unit Tests (Mocked, CI-friendly)
 ```bash
-cd omni_vision
+# unit tests (mocked, no gpu)
 pytest tests/test_pipeline_unit.py -v
-```
 
-### API Tests
-```bash
-cd omni_vision
+# api tests
 pytest tests/test_api.py -v
+
+# integration (needs gpu)
+RUN_INTEGRATION_TESTS=1 pytest -m integration
 ```
 
-### Integration Tests (GPU required)
-```bash
-export RUN_INTEGRATION_TESTS=1
-pytest tests/ -v -m integration
-```
+## Config
 
-### Stress Test (Server must be running)
-```bash
-python tests/stress_test.py
-```
-
-## 📂 Project Structure
-```text
-omni_vision/
-├── src/
-│   ├── main.py            # FastAPI Entry Point
-│   ├── pipeline.py        # BoxSet Orchestration Logic
-│   ├── model_wrappers.py  # Model Interfaces (YOLO, RF-DETR, Florence-2, SAM3)
-│   └── config.py          # Configuration
-├── tests/
-│   ├── test_pipeline_unit.py  # Unit tests with mocks
-│   ├── test_api.py            # API endpoint tests
-│   └── stress_test.py         # Load testing
-├── Dockerfile
-├── docker-compose.yml
-└── requirements.txt
-```
-
-## ⚙️ Configuration
-
-Key settings in `src/config.py`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `MAX_MASK_BOXES` | 20 | Top-K budget for SAM3 |
-| `NMS_IOU_THRESHOLD` | 0.5 | NMS merge threshold |
-| `DENSITY_THRESHOLD` | 15 | Trigger RF-DETR if YOLO finds more |
-| `SAM3_TEXT_FIRST` | True | Try text-prompt before detectors in query mode |
-| `ENABLE_FLORENCE_RERANK` | False | Enable Florence-2 reranking |
+Edit `src/config.py`:
+- `MAX_MASK_BOXES`: max boxes for SAM3 (default 20)
+- `NMS_IOU_THRESHOLD`: IoU threshold for merging boxes (0.5)
+- `DENSITY_THRESHOLD`: triggers RF-DETR when YOLO finds more than this (15)
+- `SAM3_TEXT_FIRST`: try text prompt before detectors in query mode (True)
+- `ENABLE_FLORENCE_RERANK`: enable Florence-2 reranking (False)
